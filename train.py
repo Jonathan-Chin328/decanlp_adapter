@@ -131,7 +131,7 @@ def get_learning_rate(i, args):
 def step(model, batch, opt, iteration, field, task, lr=None, grad_clip=None, writer=None, it=None):
     model.train()
     opt.zero_grad()
-    loss, predictions = model(batch)
+    loss, predictions = model(batch, task)
     loss.backward()
     if lr is not None:
         opt.param_groups[0]['lr'] = lr
@@ -140,8 +140,22 @@ def step(model, batch, opt, iteration, field, task, lr=None, grad_clip=None, wri
     opt.step()
     return loss.item(), {}
 
+def get_task_id(task):
+    return {
+        'squad': 0,
+        'iwslt': 1,
+        'cnn_dailymail': 2,
+        'multinli': 3,
+        'sst': 4,
+        'srl': 5,
+        'zre': 6,
+        'woz': 7,
+        'wikisql': 8,
+        'schema': 9
+    }[task.split('.')[0]]
 
-def train(args, model, opt, train_iters, train_iterations, field, rank=0, world_size=1, 
+
+def train(args, model, opt, opt_adapter, train_iters, train_iterations, field, rank=0, world_size=1, 
     log_every=10, val_every=100, save_every=1000, rounds=False, val_iters=[], writer=None, start_iteration=1, rnd=1):
     """main training function"""
 
@@ -220,6 +234,41 @@ def train(args, model, opt, train_iters, train_iterations, field, rank=0, world_
                     if args.warmup > 0 and args.transformer_lr:
                         lr = get_learning_rate(iteration, args) 
 
+                    # adapter 
+                    if args.adapter_grad_iter is not None and iteration >= float(args.adapter_grad_iter):
+                        opt = opt_adapter[get_task_id(task)]
+                        print('fine-tuning')
+                    
+                    # print('---------------------------------')
+                    # print('task:', task)
+                    # for name, param in model.named_parameters():
+                    #     if 'self_attentive_encoder_context.layers.1.feedforward.adapter.0.down_feedforward.linear.weight' in name:
+                    #         print(name)
+                    #         print(param)
+                    #     if 'self_attentive_encoder_context.layers.1.feedforward.adapter.9.down_feedforward.linear.weight' in name:
+                    #         print(name)
+                    #         print(param)
+                    #     if 'self_attentive_encoder_context.layers.1.feedforward.adapter.1.down_feedforward.linear.weight' in name:
+                    #         print(name)
+                    #         print(param)
+                    #     if 'self_attentive_encoder_question.layers.1.feedforward.layer.linear.weight' in name:
+                    #         print(name)
+                    #         print(param)
+
+                    # param update
+                    '''
+                    model: MQAN model
+                    batch: batch object in bucketIterator
+                    opt: Adam
+                    iteration: iteration times in this task
+                    field: processing method
+                    task: task name
+                    lr: dynamic learning rate
+                    grad_clip: gradient clipping (1)
+                    writer: SummaryWriter from textboard
+                    it: bucketIterator (iterator objject)
+                    '''
+
                     # param update
                     loss, train_metric_dict = step(model, batch, opt, iteration, field, task, lr=lr, grad_clip=args.grad_clip, writer=writer, it=train_iter)
 
@@ -297,12 +346,34 @@ def run(args, run_args, rank=0, world_size=1):
         writer = None
 
     model = init_model(args, field, logger, world_size, device)
-    opt = init_opt(args, model) 
+    #---------------adapter model optmizer initialization----------------------
+    pretrain_parameters = []
+    finetune_parameter = [[] for i in range(10)]
+    opt_adapter = []
+    if args.adapter == 'simple':
+        for name, parameters in model.named_parameters():
+            if "adapter" not in name:
+                pretrain_parameters.append(parameters)
+            else:
+                for i in range(10):
+                    if f'adapter.{i}' in name:
+                       finetune_parameter[i].append(parameters)
+        opt = init_opt(args, pretrain_parameters)
+        for i in range(10):
+            opt_adapter.append(init_opt(args, finetune_parameter[i]))
+    else:
+        opt = init_opt(args, model.parameters()) 
+        opt_adapter = opt
+    #--------------------------------------------------------------------------
     start_iteration = 1
 
     if save_dict is not None:
         logger.info(f'Loading model from {os.path.join(args.save, args.load)}')
         save_dict = torch.load(os.path.join(args.save, args.load))
+        # add the adapter parameters into model_state_dict
+        for name, parameters in model.named_parameters():
+            if name not in save_dict['model_state_dict'].keys():
+                save_dict['model_state_dict'][name] = parameters
         model.load_state_dict(save_dict['model_state_dict'])
         if args.resume:
             logger.info(f'Resuming Training from {os.path.splitext(args.load)[0]}_rank_{rank}_optim.pth')
@@ -310,7 +381,7 @@ def run(args, run_args, rank=0, world_size=1):
             start_iteration = int(os.path.splitext(os.path.basename(args.load))[0].split('_')[1])
 
     logger.info(f'Begin Training')
-    train(args, model, opt, train_iters, args.train_iterations, field, val_iters=val_iters, 
+    train(args, model, opt, opt_adapter, train_iters, args.train_iterations, field, val_iters=val_iters, 
         rank=rank, world_size=world_size, 
         log_every=args.log_every, val_every=args.val_every, rounds=len(train_iters)>1,
         writer=writer if rank==0 else None, save_every=args.save_every, start_iteration=start_iteration)
@@ -333,15 +404,15 @@ def init_model(args, field, logger, world_size, device):
     return model
 
 
-def init_opt(args, model):
+def init_opt(args, parameters):
     opt = None
     if 'adam' in args.optimizer.lower():
         if args.transformer_lr:
-            opt = torch.optim.Adam(model.params, betas=(0.9, 0.98), eps=1e-9)
+            opt = torch.optim.Adam(parameters, betas=(0.9, 0.98), eps=1e-9)
         else:
-            opt = torch.optim.Adam(model.params, betas=(args.beta0, 0.999))
+            opt = torch.optim.Adam(parameters, betas=(args.beta0, 0.999))
     else:
-        opt = torch.optim.SGD(model.params, lr=args.sgd_lr) 
+        opt = torch.optim.SGD(parameters, lr=args.sgd_lr) 
     return opt
 
 

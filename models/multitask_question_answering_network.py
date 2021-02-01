@@ -60,7 +60,7 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
         self.context_bilstm_after_coattention = PackedLSTM(dim, args.dimension,
             batch_first=True, dropout=dp(args), bidirectional=True, 
             num_layers=args.rnn_layers)
-        self.self_attentive_encoder_context = TransformerEncoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio)
+        self.self_attentive_encoder_context = TransformerEncoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio, args.adapter)
         self.bilstm_context = PackedLSTM(args.dimension, args.dimension,
             batch_first=True, dropout=dp(args), bidirectional=True, 
             num_layers=args.rnn_layers)
@@ -68,7 +68,7 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
         self.question_bilstm_after_coattention = PackedLSTM(dim, args.dimension,
             batch_first=True, dropout=dp(args), bidirectional=True, 
             num_layers=args.rnn_layers)
-        self.self_attentive_encoder_question = TransformerEncoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio)
+        self.self_attentive_encoder_question = TransformerEncoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio, args.adapter)
         self.bilstm_question = PackedLSTM(args.dimension, args.dimension,
             batch_first=True, dropout=dp(args), bidirectional=True, 
             num_layers=args.rnn_layers)
@@ -86,11 +86,13 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
         self.encoder_embeddings.set_embeddings(embeddings)
         self.decoder_embeddings.set_embeddings(embeddings)
 
-    def forward(self, batch):
+    def forward(self, batch, task):
         context, context_lengths, context_limited, context_elmo    = batch.context,  batch.context_lengths,  batch.context_limited, batch.context_elmo
         question, question_lengths, question_limited, question_elmo = batch.question, batch.question_lengths, batch.question_limited, batch.question_elmo
         answer, answer_lengths, answer_limited       = batch.answer,   batch.answer_lengths,   batch.answer_limited
         oov_to_limited_idx, limited_idx_to_full_idx  = batch.oov_to_limited_idx, batch.limited_idx_to_full_idx
+        task_id = get_task_id(task)  # change to classfier in the future
+
 
         def map_to_full(x):
             return limited_idx_to_full_idx[x]
@@ -125,13 +127,13 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
 
         context_summary = torch.cat([coattended_context, context_encoded, context_embedded], -1)
         condensed_context, _ = self.context_bilstm_after_coattention(context_summary, context_lengths)
-        self_attended_context = self.self_attentive_encoder_context(condensed_context, padding=context_padding)
+        self_attended_context = self.self_attentive_encoder_context(condensed_context, task_id, padding=context_padding)
         final_context, (context_rnn_h, context_rnn_c) = self.bilstm_context(self_attended_context[-1], context_lengths)
         context_rnn_state = [self.reshape_rnn_state(x) for x in (context_rnn_h, context_rnn_c)]
 
         question_summary = torch.cat([coattended_question, question_encoded, question_embedded], -1)
         condensed_question, _ = self.question_bilstm_after_coattention(question_summary, question_lengths)
-        self_attended_question = self.self_attentive_encoder_question(condensed_question, padding=question_padding)
+        self_attended_question = self.self_attentive_encoder_question(condensed_question, task_id, padding=question_padding)
         final_question, (question_rnn_h, question_rnn_c) = self.bilstm_question(self_attended_question[-1], question_lengths)
         question_rnn_state = [self.reshape_rnn_state(x) for x in (question_rnn_h, question_rnn_c)]
 
@@ -302,3 +304,17 @@ class DualPtrRNNDecoder(nn.Module):
     def package_outputs(self, outputs):
         outputs = torch.stack(outputs, dim=1)
         return outputs
+
+def get_task_id(task):
+    return {
+        'squad': 0,
+        'iwslt': 1,
+        'cnn_dailymail': 2,
+        'multinli': 3,
+        'sst': 4,
+        'srl': 5,
+        'zre': 6,
+        'woz': 7,
+        'wikisql': 8,
+        'schema': 9
+    }[task.split('.')[0]]

@@ -33,7 +33,8 @@ def parse():
 
     parser.add_argument('--train_tasks', nargs='+', type=str, help='tasks to use for training', required=True)
     parser.add_argument('--train_iterations', nargs='+', type=int, help='number of iterations to focus on each task')
-    parser.add_argument('--train_batch_tokens', nargs='+', default=[9000], type=int, help='Number of tokens to use for dynamic batching, corresponging to tasks in train tasks')
+    # train_batch_tokens 9000 --> 256
+    parser.add_argument('--train_batch_tokens', nargs='+', default=[4000], type=int, help='Number of tokens to use for dynamic batching, corresponging to tasks in train tasks')
     parser.add_argument('--jump_start', default=0, type=int, help='number of iterations to give jump started tasks')
     parser.add_argument('--n_jump_start', default=0, type=int, help='how many tasks to jump start (presented in order)')    
     parser.add_argument('--num_print', default=15, type=int, help='how many validation examples with greedy output to print to std out')
@@ -87,6 +88,11 @@ def parse():
     parser.add_argument('--exist_ok', action='store_true', help='Ok if the save directory already exists, i.e. overwrite is ok') 
     parser.add_argument('--token_testing', action='store_true', help='if true, sorts all iterators') 
     parser.add_argument('--reverse', action='store_true', help='if token_testing and true, sorts all iterators in reverse') 
+
+    # adapter structure
+    parser.add_argument('--adapter', default=None, choices=['simple'], help='structures to increase performance')
+    parser.add_argument('--adapter_grad_iter', default=float('inf'), help='number of iteration that start to grad adapter (if using adapter)')
+    # parser.add_argument('--adapter_size', default=64, help='number of units in the bottle neck')
 
     args = parser.parse_args()
     if args.model is None:

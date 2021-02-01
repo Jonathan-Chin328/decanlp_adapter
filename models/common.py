@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
 from torch.nn.utils.rnn import pack_padded_sequence as pack
+from .adapter import Adapter
 
 
 INF = 1e10
@@ -98,14 +99,34 @@ class LayerNorm(nn.Module):
 
 class ResidualBlock(nn.Module):
 
-    def __init__(self, layer, d_model, dropout_ratio):
+    def __init__(self, layer, d_model, dropout_ratio, adapter=None):
         super().__init__()
         self.layer = layer
         self.dropout = nn.Dropout(dropout_ratio)
         self.layernorm = LayerNorm(d_model)
+        if adapter == 'simple':
+            self.adapter = nn.ModuleList([Adapter(d_model, 10) for i in range(10)])
+        else:
+            self.adapter = None
 
-    def forward(self, *x, padding=None):
-        return self.layernorm(x[0] + self.dropout(self.layer(*x, padding=padding)))
+
+    def forward(self, *x, task_id=None, padding=None):
+        if self.adapter is not None:
+            hidden = self.layer(*x, padding=padding)
+            # print('before', hidden)
+            # print('after', self.adapter[task_id](hidden))
+            # print('----------------------------------')
+            # print('task_id', task_id)
+            for i in range(len(self.adapter)):
+                if i != task_id:
+                    for name, param in self.adapter[i].named_parameters():
+                        param.requires_grad = False
+                else:
+                    for name, param in self.adapter[i].named_parameters():
+                        param.requires_grad = True
+            return self.layernorm(x[0] + self.dropout(self.adapter[task_id](hidden)))
+        else:
+            return self.layernorm(x[0] + self.dropout(self.layer(*x, padding=padding)))
 
 
 class Attention(nn.Module):
@@ -157,33 +178,33 @@ class LinearReLU(nn.Module):
 
 class TransformerEncoderLayer(nn.Module):
 
-    def __init__(self, dimension, n_heads, hidden, dropout):
+    def __init__(self, dimension, n_heads, hidden, dropout, adapter):
         super().__init__()
         self.selfattn = ResidualBlock(
             MultiHead(
                 dimension, dimension, n_heads, dropout),
-            dimension, dropout)
+            dimension, dropout, adapter)
         self.feedforward = ResidualBlock(
             LinearReLU(dimension, hidden),
-            dimension, dropout)
+            dimension, dropout, adapter)
 
-    def forward(self, x, padding=None):
-        return self.feedforward(self.selfattn(x, x, x, padding=padding))
+    def forward(self, x, task_id, padding=None):
+        return self.feedforward(self.selfattn(x, x, x, task_id=task_id, padding=padding), task_id=task_id)
 
 
 class TransformerEncoder(nn.Module):
 
-    def __init__(self, dimension, n_heads, hidden, num_layers, dropout):
+    def __init__(self, dimension, n_heads, hidden, num_layers, dropout, adapter=None):
         super().__init__()
         self.layers = nn.ModuleList(
-            [TransformerEncoderLayer(dimension, n_heads, hidden, dropout) for i in range(num_layers)])
+            [TransformerEncoderLayer(dimension, n_heads, hidden, dropout, adapter) for i in range(num_layers)])
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, padding=None):
+    def forward(self, x, task_id, padding=None):
         x = self.dropout(x)
         encoding = [x]
         for layer in self.layers:
-            x = layer(x, padding=padding)
+            x = layer(x, task_id, padding=padding)
             encoding.append(x)
         return encoding
 
