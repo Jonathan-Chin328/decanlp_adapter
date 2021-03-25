@@ -90,9 +90,9 @@ def parse():
     parser.add_argument('--reverse', action='store_true', help='if token_testing and true, sorts all iterators in reverse') 
 
     # adapter structure
-    parser.add_argument('--adapter', default=None, choices=['simple'], help='structures to increase performance')
-    parser.add_argument('--adapter_grad_iter', default=float('inf'), help='number of iteration that start to grad adapter (if using adapter)')
-    # parser.add_argument('--adapter_size', default=64, help='number of units in the bottle neck')
+    parser.add_argument('--adapter', default=[], nargs='+', choices=['transformer', 'lstm'], help='structures to increase performance')
+    parser.add_argument('--adapter_grad_iter', default=1e10, help='number of iteration that start to grad adapter (if using adapter)')
+    parser.add_argument('--adapter_size', default=64, help='number of units in the bottle neck')
 
     args = parser.parse_args()
     if args.model is None:
@@ -102,6 +102,9 @@ def parse():
         for t in args.train_tasks:
             if t not in args.val_tasks:
                 args.val_tasks.append(t)
+
+    if args.adapter_size is not None:
+        args.adapter_size = int(args.adapter_size)
 
     if 'imdb' in args.val_tasks:
         args.val_tasks.remove('imdb')

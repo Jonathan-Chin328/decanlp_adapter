@@ -120,7 +120,7 @@ def run(args, field, val_sets, model):
                     predictions = []
                     ids = []
                     for batch_idx, batch in enumerate(it):
-                        _, p = model(batch)
+                        _, p = model(batch, task)
                         p = field.reverse(p)
                         for i, pp in enumerate(p):
                             if 'sql' in task:
@@ -204,6 +204,11 @@ def get_args():
     parser.add_argument('--rouge', action='store_true', help='whether to use the bleu metric (always on for cnn, dailymail, and cnn_dailymail)')
     parser.add_argument('--overwrite', action='store_true', help='whether to overwrite previously written predictions')
     parser.add_argument('--silent', action='store_true', help='whether to print predictions to stdout')
+
+    # adapter structure
+    parser.add_argument('--adapter', default=None, choices=['transformer', 'lstm'], help='structures to increase performance')
+    parser.add_argument('--adapter_grad_iter', default=1e10, help='number of iteration that start to grad adapter (if using adapter)')
+    parser.add_argument('--adapter_size', default=64, help='number of units in the bottle neck')
 
     args = parser.parse_args()
 

@@ -154,6 +154,20 @@ def get_task_id(task):
         'schema': 9
     }[task.split('.')[0]]
 
+def get_score(task):
+    return {
+        'squad': 'nf1',
+        'iwslt': 'bleu',
+        'cnn_dailymail': 'avg_rouge',
+        'multinli': 'em',
+        'sst': 'em',
+        'srl': 'nf1',
+        'zre': 'corpus_f1',
+        'woz': 'joint_goal_em',
+        'wikisql': 'lfem',
+        'schema': 'em'
+    }[task.split('.')[0]]
+
 
 def train(args, model, opt, opt_adapter, train_iters, train_iterations, field, rank=0, world_size=1, 
     log_every=10, val_every=100, save_every=1000, rounds=False, val_iters=[], writer=None, start_iteration=1, rnd=1):
@@ -185,6 +199,9 @@ def train(args, model, opt, opt_adapter, train_iters, train_iterations, field, r
                 continue
             task_iteration = 1
             for batch in train_iter:
+                # print(task)
+                # print(batch.context[0])
+                # print('*******************************************')
                 if not args.resume or iteration > start_iteration:
                     task_progress = f'{task_iteration}/{task_iterations}:' if task_iterations is not None else ''
                     round_progress = f'round_{rnd}:' if rounds else ''
@@ -194,6 +211,7 @@ def train(args, model, opt, opt_adapter, train_iters, train_iterations, field, r
                         ((iteration % args.val_every == 0 % args.val_every) or 
                             (args.load and iteration == start_iteration + 1))):
                         train_task_val_metric = None
+                        deca_score = 0
                         for val_task_idx, (val_task, val_iter) in enumerate(val_iters):
                             val_loss, metric_dict = validate(val_task, val_iter, model, logger, field, world_size, rank, num_print=args.num_print, args=args)
                             if val_loss is not None:
@@ -206,6 +224,10 @@ def train(args, model, opt, opt_adapter, train_iters, train_iterations, field, r
                             for metric_key, metric_value in metric_dict.items():
                                 metric_entry += f'{metric_key}_{metric_value:.2f}:'
                             metric_entry = metric_entry[:-1]
+
+                            deca_score += metric_dict[get_score(val_task)]
+                            print('task', val_task)
+                            print('metric_dict', metric_dict)
                            
                             # val log
                             logger.info(log_entry + metric_entry)
@@ -216,6 +238,10 @@ def train(args, model, opt, opt_adapter, train_iters, train_iterations, field, r
                                     writer.add_scalars(f'{metric_key}/{val_task}', {'val': metric_value}, iteration)
                                     writer.add_scalars(f'{val_task}/{metric_key}', {'val': metric_value}, iteration)
                                     writer.add_scalars(f'{val_task}/val', {f'{metric_key}': metric_value}, iteration)
+
+                        if writer is not None:
+                            writer.add_scalar('deca/val', deca_score, iteration)
+                        print('deca_score:', deca_score, ' iteration:', iteration)
 
                     # saving
                     if save_every is not None and (iteration % args.save_every == 0 % args.save_every):
@@ -237,7 +263,7 @@ def train(args, model, opt, opt_adapter, train_iters, train_iterations, field, r
                     # adapter 
                     if args.adapter_grad_iter is not None and iteration >= float(args.adapter_grad_iter):
                         opt = opt_adapter[get_task_id(task)]
-                        print('fine-tuning')
+                        # print('fine-tuning')
                     
                     # print('---------------------------------')
                     # print('task:', task)
@@ -251,7 +277,7 @@ def train(args, model, opt, opt_adapter, train_iters, train_iterations, field, r
                     #     if 'self_attentive_encoder_context.layers.1.feedforward.adapter.1.down_feedforward.linear.weight' in name:
                     #         print(name)
                     #         print(param)
-                    #     if 'self_attentive_encoder_question.layers.1.feedforward.layer.linear.weight' in name:
+                    #     if 'bilstm_before_coattention.rnn.weight_ih_l0' in name:
                     #         print(name)
                     #         print(param)
 
@@ -350,14 +376,20 @@ def run(args, run_args, rank=0, world_size=1):
     pretrain_parameters = []
     finetune_parameter = [[] for i in range(10)]
     opt_adapter = []
-    if args.adapter == 'simple':
+    if args.adapter != []:
         for name, parameters in model.named_parameters():
             if "adapter" not in name:
+                if args.transformer_layers != 2 and args.load is not None:   # pretrain with only adding transformer layers
+                    if 'self_attentive_encoder' not in name:
+                        continue
+                    if '0' in name or '1' in name:
+                        continue
                 pretrain_parameters.append(parameters)
             else:
                 for i in range(10):
                     if f'adapter.{i}' in name:
                        finetune_parameter[i].append(parameters)
+                print(name)
         opt = init_opt(args, pretrain_parameters)
         for i in range(10):
             opt_adapter.append(init_opt(args, finetune_parameter[i]))
@@ -373,12 +405,20 @@ def run(args, run_args, rank=0, world_size=1):
         # add the adapter parameters into model_state_dict
         for name, parameters in model.named_parameters():
             if name not in save_dict['model_state_dict'].keys():
+                if 'self_attentive_encoder' in name and 'adapter' not in name:
+                    layer = name.split('.')[2]
+                    if int(layer) % 2 == 0:
+                        parameter = save_dict['model_state_dict'][name.replace(layer, '0', 1)]
+                    else:
+                        parameter = save_dict['model_state_dict'][name.replace(layer, '1', 1)]
                 save_dict['model_state_dict'][name] = parameters
         model.load_state_dict(save_dict['model_state_dict'])
         if args.resume:
             logger.info(f'Resuming Training from {os.path.splitext(args.load)[0]}_rank_{rank}_optim.pth')
-            opt.load_state_dict(torch.load(os.path.join(args.save, f'{os.path.splitext(args.load)[0]}_rank_{rank}_optim.pth')))
+            opt_save_dict = torch.load(os.path.join(args.save, f'{os.path.splitext(args.load)[0]}_rank_{rank}_optim.pth'))
+            opt.load_state_dict(opt_save_dict)
             start_iteration = int(os.path.splitext(os.path.basename(args.load))[0].split('_')[1])
+
 
     logger.info(f'Begin Training')
     train(args, model, opt, opt_adapter, train_iters, args.train_iterations, field, val_iters=val_iters, 

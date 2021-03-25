@@ -12,7 +12,7 @@ from cove import MTLSTM
 #from allennlp.modules.elmo import Elmo, batch_to_ids
 
 from .common import positional_encodings_like, INF, EPSILON, TransformerEncoder, TransformerDecoder, PackedLSTM, LSTMDecoderAttention, LSTMDecoder, Embedding, Feedforward, mask, CoattentiveLayer
-
+from .adapter import Adapter
 
 class MultitaskQuestionAnsweringNetwork(nn.Module):
 
@@ -57,10 +57,20 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
         self.coattention = CoattentiveLayer(args.dimension, dropout=0.3)
         dim = 2*args.dimension + args.dimension + args.dimension
 
+        if 'lstm' in self.args.adapter:
+            self.after_independent_encoding_adapter = nn.ModuleList([Adapter(args.dimension, args.adapter_size, layer_normalization=True) for i in range(10)])
+            self.middle_coattention_adapter = nn.ModuleList([Adapter(2*args.dimension, args.adapter_size, layer_normalization=True) for i in range(10)])
+            self.after_coattention_adapter = nn.ModuleList([Adapter(dim, args.adapter_size, layer_normalization=True) for i in range(10)])
+            self.after_compression_adapter = nn.ModuleList([Adapter(args.dimension, args.adapter_size, layer_normalization=True) for i in range(10)])
+            self.after_self_attention_adapter = nn.ModuleList([Adapter(args.dimension, args.adapter_size, layer_normalization=True) for i in range(10)])
+            self.after_coattention_adapter_q = nn.ModuleList([Adapter(dim, args.adapter_size, layer_normalization=True) for i in range(10)])
+            self.after_compression_adapter_q = nn.ModuleList([Adapter(args.dimension, args.adapter_size, layer_normalization=True) for i in range(10)])
+            self.after_self_attention_adapter_q = nn.ModuleList([Adapter(args.dimension, args.adapter_size, layer_normalization=True) for i in range(10)])
+        
         self.context_bilstm_after_coattention = PackedLSTM(dim, args.dimension,
             batch_first=True, dropout=dp(args), bidirectional=True, 
             num_layers=args.rnn_layers)
-        self.self_attentive_encoder_context = TransformerEncoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio, args.adapter)
+        self.self_attentive_encoder_context = TransformerEncoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio, args.adapter, args.adapter_size)
         self.bilstm_context = PackedLSTM(args.dimension, args.dimension,
             batch_first=True, dropout=dp(args), bidirectional=True, 
             num_layers=args.rnn_layers)
@@ -68,7 +78,7 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
         self.question_bilstm_after_coattention = PackedLSTM(dim, args.dimension,
             batch_first=True, dropout=dp(args), bidirectional=True, 
             num_layers=args.rnn_layers)
-        self.self_attentive_encoder_question = TransformerEncoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio, args.adapter)
+        self.self_attentive_encoder_question = TransformerEncoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio, args.adapter, args.adapter_size)
         self.bilstm_question = PackedLSTM(args.dimension, args.dimension,
             batch_first=True, dropout=dp(args), bidirectional=True, 
             num_layers=args.rnn_layers)
@@ -120,20 +130,52 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
         context_encoded = self.bilstm_before_coattention(context_embedded, context_lengths)[0]
         question_encoded = self.bilstm_before_coattention(question_embedded, question_lengths)[0]
 
+        if 'lstm' in self.args.adapter:       # adapter lstm
+            context_encoded = self.after_independent_encoding_adapter[task_id](context_encoded)
+            question_encoded = self.after_independent_encoding_adapter[task_id](question_encoded)
+
         context_padding = context.data == self.pad_idx
         question_padding = question.data == self.pad_idx
 
         coattended_context, coattended_question = self.coattention(context_encoded, question_encoded, context_padding, question_padding)
 
+        # if 'lstm' in self.args.adapter:       # adapter lstm
+        #     coattended_context = self.middle_coattention_adapter[task_id](coattended_context)
+        #     coattended_question = self.middle_coattention_adapter[task_id](coattended_question)
+
         context_summary = torch.cat([coattended_context, context_encoded, context_embedded], -1)
+
+        if 'lstm' in self.args.adapter:       # adapter lstm
+            context_summary = self.after_coattention_adapter[task_id](context_summary)
+
         condensed_context, _ = self.context_bilstm_after_coattention(context_summary, context_lengths)
+
+        if 'lstm' in self.args.adapter:       # adapter lstm
+            condensed_context = self.after_compression_adapter[task_id](condensed_context)
+
         self_attended_context = self.self_attentive_encoder_context(condensed_context, task_id, padding=context_padding)
+
+        if 'lstm' in self.args.adapter:       # adapter lstm
+            self_attended_context[-1] = self.after_self_attention_adapter[task_id](self_attended_context[-1])
+
         final_context, (context_rnn_h, context_rnn_c) = self.bilstm_context(self_attended_context[-1], context_lengths)
         context_rnn_state = [self.reshape_rnn_state(x) for x in (context_rnn_h, context_rnn_c)]
 
         question_summary = torch.cat([coattended_question, question_encoded, question_embedded], -1)
+
+        if 'lstm' in self.args.adapter:       # adapter lstm
+            question_summary = self.after_coattention_adapter_q[task_id](question_summary)
+
         condensed_question, _ = self.question_bilstm_after_coattention(question_summary, question_lengths)
+
+        if 'lstm' in self.args.adapter:       # adapter lstm
+            condensed_question = self.after_compression_adapter_q[task_id](condensed_question)
+
         self_attended_question = self.self_attentive_encoder_question(condensed_question, task_id, padding=question_padding)
+        
+        if 'lstm' in self.args.adapter:       # adapter lstm
+            self_attended_question[-1] = self.after_self_attention_adapter_q[task_id](self_attended_question[-1])
+
         final_question, (question_rnn_h, question_rnn_c) = self.bilstm_question(self_attended_question[-1], question_lengths)
         question_rnn_state = [self.reshape_rnn_state(x) for x in (question_rnn_h, question_rnn_c)]
 

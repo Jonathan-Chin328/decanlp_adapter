@@ -99,13 +99,13 @@ class LayerNorm(nn.Module):
 
 class ResidualBlock(nn.Module):
 
-    def __init__(self, layer, d_model, dropout_ratio, adapter=None):
+    def __init__(self, layer, d_model, dropout_ratio, adapter=[], adapter_size=None):
         super().__init__()
         self.layer = layer
         self.dropout = nn.Dropout(dropout_ratio)
         self.layernorm = LayerNorm(d_model)
-        if adapter == 'simple':
-            self.adapter = nn.ModuleList([Adapter(d_model, 10) for i in range(10)])
+        if 'transformer' in adapter:
+            self.adapter = nn.ModuleList([Adapter(d_model, adapter_size) for i in range(10)])
         else:
             self.adapter = None
 
@@ -178,15 +178,15 @@ class LinearReLU(nn.Module):
 
 class TransformerEncoderLayer(nn.Module):
 
-    def __init__(self, dimension, n_heads, hidden, dropout, adapter):
+    def __init__(self, dimension, n_heads, hidden, dropout, adapter, adapter_size):
         super().__init__()
         self.selfattn = ResidualBlock(
             MultiHead(
                 dimension, dimension, n_heads, dropout),
-            dimension, dropout, adapter)
+            dimension, dropout, adapter, adapter_size)
         self.feedforward = ResidualBlock(
             LinearReLU(dimension, hidden),
-            dimension, dropout, adapter)
+            dimension, dropout, adapter, adapter_size)
 
     def forward(self, x, task_id, padding=None):
         return self.feedforward(self.selfattn(x, x, x, task_id=task_id, padding=padding), task_id=task_id)
@@ -194,10 +194,10 @@ class TransformerEncoderLayer(nn.Module):
 
 class TransformerEncoder(nn.Module):
 
-    def __init__(self, dimension, n_heads, hidden, num_layers, dropout, adapter=None):
+    def __init__(self, dimension, n_heads, hidden, num_layers, dropout, adapter=[], adapter_size=None):
         super().__init__()
         self.layers = nn.ModuleList(
-            [TransformerEncoderLayer(dimension, n_heads, hidden, dropout, adapter) for i in range(num_layers)])
+            [TransformerEncoderLayer(dimension, n_heads, hidden, dropout, adapter, adapter_size) for i in range(num_layers)])
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, task_id, padding=None):
