@@ -5,6 +5,7 @@ import sys
 import torch
 import random
 import numpy as np
+import argparse
 
 
 def get_context_question(ex, context, question, field):
@@ -13,6 +14,7 @@ def get_context_question(ex, context, question, field):
 
 def preprocess_examples(args, tasks, splits, field, logger=None, train=True):
     min_length = 1
+    max_question_lengths = 1
     max_context_length = args.max_train_context_length if train else args.max_val_context_length
     is_too_long = lambda ex: (len(ex.answer)>args.max_answer_length or
         len(ex.context)>max_context_length)
@@ -54,16 +56,23 @@ def preprocess_examples(args, tasks, splits, field, logger=None, train=True):
             logger.info(f'{task} question lengths (min, mean, max): {np.min(question_lengths)}, {int(np.mean(question_lengths))}, {np.max(question_lengths)}')
             logger.info(f'{task} answer lengths (min, mean, max): {np.min(answer_lengths)}, {int(np.mean(answer_lengths))}, {np.max(answer_lengths)}')
 
+            if np.max(question_lengths) > max_question_lengths :
+                max_question_lengths = np.max(question_lengths)
+
+
         for x in s.examples:
             x.context_question = get_context_question(x, x.context, x.question, field)
 
-        if logger is not None:
-            logger.info('Tokenized examples:')
-            for ex in s.examples[:10]:
-                logger.info('Context: ' + ' '.join(ex.context))
-                logger.info('Question: ' + ' '.join(ex.question))
-                logger.info(' '.join(ex.context_question))
-                logger.info('Answer: ' + ' '.join(ex.answer))
+        # if logger is not None:
+        #     logger.info('Tokenized examples:')
+        #     for ex in s.examples[:10]:
+        #         logger.info('Context: ' + ' '.join(ex.context))
+        #         logger.info('Question: ' + ' '.join(ex.question))
+        #         logger.info(' '.join(ex.context_question))
+        #         logger.info('Answer: ' + ' '.join(ex.answer))
+
+    if max_question_lengths > args.max_question_length:
+        setattr(args, 'max_question_length', max_question_lengths)
 
 
 

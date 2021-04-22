@@ -55,6 +55,7 @@ def parse():
     parser.add_argument('--max_train_context_length', default=400, type=int, help='maximum length of the contexts during training')
     parser.add_argument('--max_val_context_length', default=400, type=int, help='maximum length of the contexts during validation')
     parser.add_argument('--max_answer_length', default=50, type=int, help='maximum length of answers during training and validation')
+    parser.add_argument('--max_question_length', default=86, type=int, help='the maximum length of question during training and validation(default for Muntinli dataset)')
     parser.add_argument('--subsample', default=20000000, type=int, help='subsample the datasets')
     parser.add_argument('--preserve_case', action='store_false', dest='lower', help='whether to preserve casing for all text')
 
@@ -93,6 +94,7 @@ def parse():
     parser.add_argument('--adapter', default=[], nargs='+', choices=['transformer', 'lstm'], help='structures to increase performance')
     parser.add_argument('--adapter_grad_iter', default=1e10, help='number of iteration that start to grad adapter (if using adapter)')
     parser.add_argument('--adapter_size', default=64, help='number of units in the bottle neck')
+    parser.add_argument('--adapter_classification', default=None, choices=['transformer', 'lstm'], help='whether to use key-value or classification to get adapter id (only for transformer adapter)')
 
     args = parser.parse_args()
     if args.model is None:

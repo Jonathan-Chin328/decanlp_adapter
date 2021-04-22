@@ -120,7 +120,7 @@ def run(args, field, val_sets, model):
                     predictions = []
                     ids = []
                     for batch_idx, batch in enumerate(it):
-                        _, p = model(batch, task)
+                        _, p, _ = model(batch, task)
                         p = field.reverse(p)
                         for i, pp in enumerate(p):
                             if 'sql' in task:
@@ -209,6 +209,8 @@ def get_args():
     parser.add_argument('--adapter', default=None, choices=['transformer', 'lstm'], help='structures to increase performance')
     parser.add_argument('--adapter_grad_iter', default=1e10, help='number of iteration that start to grad adapter (if using adapter)')
     parser.add_argument('--adapter_size', default=64, help='number of units in the bottle neck')
+    parser.add_argument('--adapter_classification', default=False, type=bool, help='whether to use key-value or classification to get adapter id (only for transformer adapter)')
+
 
     args = parser.parse_args()
 

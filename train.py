@@ -262,7 +262,10 @@ def train(args, model, opt, opt_adapter, train_iters, train_iterations, field, r
 
                     # adapter 
                     if args.adapter_grad_iter is not None and iteration >= float(args.adapter_grad_iter):
-                        opt = opt_adapter[get_task_id(task)]
+                        if args.adapter_classification == False:
+                            opt = opt_adapter[get_task_id(task)]
+                        else:
+                            opt = opt_adapter
                         # print('fine-tuning')
                     
                     # print('---------------------------------')
@@ -374,9 +377,12 @@ def run(args, run_args, rank=0, world_size=1):
     model = init_model(args, field, logger, world_size, device)
     #---------------adapter model optmizer initialization----------------------
     pretrain_parameters = []
-    finetune_parameter = [[] for i in range(10)]
+    if args.adapter_classification is None:
+        finetune_parameter = [[] for i in range(10)]
+    else:
+        finetune_parameter = []
     opt_adapter = []
-    if args.adapter != []:
+    if args.adapter != [] and args.adapter_classification is not None:       # change the second condition to  decide whether finetune or train whole model
         for name, parameters in model.named_parameters():
             if "adapter" not in name:
                 if args.transformer_layers != 2 and args.load is not None:   # pretrain with only adding transformer layers
@@ -386,13 +392,18 @@ def run(args, run_args, rank=0, world_size=1):
                         continue
                 pretrain_parameters.append(parameters)
             else:
-                for i in range(10):
-                    if f'adapter.{i}' in name:
-                       finetune_parameter[i].append(parameters)
-                print(name)
+                if args.adapter_classification is None:                      # key-value
+                    for i in range(10):
+                        if f'adapter.{i}' in name:
+                            finetune_parameter[i].append(parameters)
+                else:
+                    finetune_parameter.append(parameters)
         opt = init_opt(args, pretrain_parameters)
-        for i in range(10):
-            opt_adapter.append(init_opt(args, finetune_parameter[i]))
+        if args.adapter_classification is None:                              # key-value
+            for i in range(10):
+                opt_adapter.append(init_opt(args, finetune_parameter[i]))
+        else:
+            opt_adapter = init_opt(args, finetune_parameter)
     else:
         opt = init_opt(args, model.parameters()) 
         opt_adapter = opt

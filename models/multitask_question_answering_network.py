@@ -11,7 +11,7 @@ from util import get_trainable_params
 from cove import MTLSTM
 #from allennlp.modules.elmo import Elmo, batch_to_ids
 
-from .common import positional_encodings_like, INF, EPSILON, TransformerEncoder, TransformerDecoder, PackedLSTM, LSTMDecoderAttention, LSTMDecoder, Embedding, Feedforward, mask, CoattentiveLayer
+from .common import positional_encodings_like, INF, EPSILON, TransformerEncoder, TransformerDecoder, PackedLSTM, LSTMDecoderAttention, LSTMDecoder, Embedding, Feedforward, mask, CoattentiveLayer, QuestionClassifier, QuestionTrnasformerClassifier
 from .adapter import Adapter
 
 class MultitaskQuestionAnsweringNetwork(nn.Module):
@@ -57,6 +57,13 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
         self.coattention = CoattentiveLayer(args.dimension, dropout=0.3)
         dim = 2*args.dimension + args.dimension + args.dimension
 
+        # adapter classification layer
+        if self.args.adapter_classification is not None:
+            if self.args.adapter_classification == 'lstm':
+                self.adapter_task_classfied_lstm = QuestionClassifier(args.dimension,  10, self.args.max_question_length, batch_first=True, bidirectional=True, num_layers=1, dropout=0)
+            elif self.args.adapter_classification == 'transformer':
+                self.adapter_task_classfied_transformer = QuestionTrnasformerClassifier(args.dimension, 10, self.args.max_question_length, head=4, hidden=150, num_layers=2, dropout=0.2, batch_first=True)
+
         if 'lstm' in self.args.adapter:
             self.after_independent_encoding_adapter = nn.ModuleList([Adapter(args.dimension, args.adapter_size, layer_normalization=True) for i in range(10)])
             self.middle_coattention_adapter = nn.ModuleList([Adapter(2*args.dimension, args.adapter_size, layer_normalization=True) for i in range(10)])
@@ -96,12 +103,19 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
         self.encoder_embeddings.set_embeddings(embeddings)
         self.decoder_embeddings.set_embeddings(embeddings)
 
+    def task_classification(self, question, question_lengths, question_padding):
+        if self.args.adapter_classification == 'lstm':
+            classification = self.adapter_task_classfied_lstm(question, question_lengths)
+        elif self.args.adapter_classification == 'transformer':
+            classification = self.adapter_task_classfied_transformer(question, question_lengths, question_padding)
+        return classification
+
+
     def forward(self, batch, task):
         context, context_lengths, context_limited, context_elmo    = batch.context,  batch.context_lengths,  batch.context_limited, batch.context_elmo
         question, question_lengths, question_limited, question_elmo = batch.question, batch.question_lengths, batch.question_limited, batch.question_elmo
         answer, answer_lengths, answer_limited       = batch.answer,   batch.answer_lengths,   batch.answer_limited
         oov_to_limited_idx, limited_idx_to_full_idx  = batch.oov_to_limited_idx, batch.limited_idx_to_full_idx
-        task_id = get_task_id(task)  # change to classfier in the future
 
 
         def map_to_full(x):
@@ -126,16 +140,25 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
                 question_embedded = self.project_embeddings(torch.cat([question_embedded, question_elmo], -1))
         else:
             context_embedded, question_embedded = context_elmo, question_elmo 
+        
+        context_padding = context.data == self.pad_idx
+        question_padding = question.data == self.pad_idx
 
-        context_encoded = self.bilstm_before_coattention(context_embedded, context_lengths)[0]
+        # decide the way to get adapter id  (key-value or classification(only for transformer))
+        if self.args.adapter_classification is None:
+            task_id = get_task_id(task)
+        else:
+            task_id = self.task_classification(question_embedded, question_lengths, question_padding)
+        # print('********************************************')
+        # print(get_task_id(task))
+        # print(task_id[0])
+
         question_encoded = self.bilstm_before_coattention(question_embedded, question_lengths)[0]
+        context_encoded = self.bilstm_before_coattention(context_embedded, context_lengths)[0]
 
         if 'lstm' in self.args.adapter:       # adapter lstm
             context_encoded = self.after_independent_encoding_adapter[task_id](context_encoded)
             question_encoded = self.after_independent_encoding_adapter[task_id](question_encoded)
-
-        context_padding = context.data == self.pad_idx
-        question_padding = question.data == self.pad_idx
 
         coattended_context, coattended_question = self.coattention(context_encoded, question_encoded, context_padding, question_padding)
 
@@ -189,6 +212,17 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
 
         self.dual_ptr_rnn_decoder.applyMasks(context_padding, question_padding)
 
+        # print(task, get_task_id(task))
+        # adapter_labels = torch.full((task_id.shape[0],), get_task_id(task), dtype=torch.int64).to(task_id.device)
+        # loss_classification = F.cross_entropy(task_id, adapter_labels)
+        # print(loss_classification)
+        # print(task_id[:2])
+        # print('**********************')
+        # print(adapter_labels[:2])
+        # loss_classification_1 = F.cross_entropy(task_id[:2], adapter_labels[:2])
+        # print(loss_classification_1)
+        # assert 1 == 2
+
         if self.training:
             answer_padding = (answer_indices.data == pad_idx)[:, :-1]
             answer_embedded = self.decoder_embeddings(answer)
@@ -204,12 +238,30 @@ class MultitaskQuestionAnsweringNetwork(nn.Module):
 
             probs, targets = mask(answer_indices[:, 1:].contiguous(), probs.contiguous(), pad_idx=pad_idx)
             loss = F.nll_loss(probs.log(), targets)
+
+            # classification loss
+            gamma = 0.9
+            adapter_labels = torch.full((task_id.shape[0],), get_task_id(task), dtype=torch.int64).to(task_id.device)
+            loss_classification = F.cross_entropy(task_id, adapter_labels)
+            loss = gamma * loss + (1 - gamma) * loss_classification
             return loss, None
         else:
-            return None, self.greedy(self_attended_context, final_context, final_question, 
-                context_indices, question_indices,
-                oov_to_limited_idx, rnn_state=context_rnn_state).data
- 
+            if type(task_id) is int:
+                return None, self.greedy(self_attended_context, final_context, final_question, 
+                    context_indices, question_indices,
+                    oov_to_limited_idx, rnn_state=context_rnn_state).data, None
+            else:
+                return None, self.greedy(self_attended_context, final_context, final_question, 
+                    context_indices, question_indices,
+                    oov_to_limited_idx, rnn_state=context_rnn_state).data, self.compute_task_id_distribution(task_id)
+
+    def compute_task_id_distribution(self, task_id):
+        # print('**************************************')
+        distribution = 0
+        for i in range(len(task_id)):
+            distribution += task_id[i]
+        return distribution / len(task_id)
+
     def reshape_rnn_state(self, h):
         return h.view(h.size(0) // 2, 2, h.size(1), h.size(2)) \
                 .transpose(1, 2).contiguous() \

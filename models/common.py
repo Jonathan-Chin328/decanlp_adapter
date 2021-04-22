@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
 from torch.nn.utils.rnn import pack_padded_sequence as pack
+from torch.nn.utils.rnn import pad_sequence
 from .adapter import Adapter
 
 
@@ -111,20 +112,25 @@ class ResidualBlock(nn.Module):
 
 
     def forward(self, *x, task_id=None, padding=None):
-        if self.adapter is not None:
+        if self.adapter is not None and task_id is not None:
             hidden = self.layer(*x, padding=padding)
-            # print('before', hidden)
-            # print('after', self.adapter[task_id](hidden))
-            # print('----------------------------------')
-            # print('task_id', task_id)
-            for i in range(len(self.adapter)):
-                if i != task_id:
-                    for name, param in self.adapter[i].named_parameters():
-                        param.requires_grad = False
-                else:
-                    for name, param in self.adapter[i].named_parameters():
-                        param.requires_grad = True
-            return self.layernorm(x[0] + self.dropout(self.adapter[task_id](hidden)))
+            # key-value
+            if isinstance(task_id, int):                    
+                for i in range(len(self.adapter)):
+                    if i != task_id:
+                        for name, param in self.adapter[i].named_parameters():
+                            param.requires_grad = False
+                    else:
+                        for name, param in self.adapter[i].named_parameters():
+                            param.requires_grad = True
+                return self.layernorm(x[0] + self.dropout(self.adapter[task_id](hidden)))
+            # classfication
+            else:
+                adapter_output = torch.zeros(hidden.shape).to(hidden.device)
+                for i in range(task_id.shape[-1]):
+                    distribution_i = torch.reshape(task_id[:,i], (task_id.shape[0], 1, 1))
+                    adapter_output += self.adapter[i](hidden) * distribution_i
+                return self.layernorm(x[0] + self.dropout(adapter_output))
         else:
             return self.layernorm(x[0] + self.dropout(self.layer(*x, padding=padding)))
 
@@ -200,7 +206,7 @@ class TransformerEncoder(nn.Module):
             [TransformerEncoderLayer(dimension, n_heads, hidden, dropout, adapter, adapter_size) for i in range(num_layers)])
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, task_id, padding=None):
+    def forward(self, x, task_id=None, padding=None):
         x = self.dropout(x)
         encoding = [x]
         for layer in self.layers:
@@ -304,11 +310,12 @@ class PackedLSTM(nn.Module):
                            batch_first=batch_first)
         self.batch_first = batch_first
 
-    def forward(self, inputs, lengths, hidden=None):
+    def forward(self, inputs, lengths, hidden=None, silent=True):
         lens, indices = torch.sort(inputs.new_tensor(lengths, dtype=torch.long), 0, True)
         inputs = inputs[indices] if self.batch_first else inputs[:, indices] 
         outputs, (h, c) = self.rnn(pack(inputs, lens.tolist(), 
             batch_first=self.batch_first), hidden)
+
         outputs = unpack(outputs, batch_first=self.batch_first)[0]
         _, _indices = torch.sort(indices, 0)
         outputs = outputs[_indices] if self.batch_first else outputs[:, _indices]
@@ -450,4 +457,85 @@ class CoattentiveLayer(nn.Module):
         raw_scores = original.clone()
         raw_scores.masked_fill_(padding.unsqueeze(-1).expand_as(raw_scores), -INF)
         return F.softmax(raw_scores, dim=1)
+
+class QuestionClassifier(nn.Module):
+    def __init__(self, d_in, d_out, max_question_length, bidirectional=False, num_layers=1, 
+        dropout=0.0, batch_first=True):
+        """A wrapper class that packs input sequences and unpacks output sequences"""
+        super().__init__()
+        if bidirectional:
+            rnn_out = d_out // 2
+        else:
+            rnn_out = d_out
+        self.rnn = nn.LSTM(d_in, rnn_out,
+                           num_layers=num_layers,
+                           dropout=dropout,
+                           bidirectional=bidirectional,
+                           batch_first=batch_first)
+        self.batch_first = batch_first
+        self.max_question_length = max_question_length + 2   # for padding
+        self.fc_layers = nn.Sequential(
+            nn.Linear(d_out * self.max_question_length, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 10),
+            nn.Softmax(dim=1)
+        )
+
+    def forward(self, inputs, lengths, hidden=None, silent=True):
+        lens, indices = torch.sort(inputs.new_tensor(lengths, dtype=torch.long), 0, True)
+        inputs = inputs[indices] if self.batch_first else inputs[:, indices] 
+        outputs, (h, c) = self.rnn(pack(inputs, lens.tolist(), 
+            batch_first=self.batch_first), hidden)
+        outputs = unpack(outputs, batch_first=self.batch_first)[0]
+        _, _indices = torch.sort(indices, 0)
+        outputs = outputs[_indices] if self.batch_first else outputs[:, _indices]
+        h, c = h[:, _indices, :], c[:, _indices, :]
+
+        # padding
+        (batch_size, seq_len) = (outputs.shape[0], outputs.shape[1]) if self.batch_first else (outputs.shape[1], outputs.shape[0])
+        pad = torch.zeros((batch_size, self.max_question_length - seq_len, outputs.shape[-1])).to(outputs.device)
+        outputs = torch.cat((outputs, pad), 1)
+        outputs = torch.reshape(outputs, (batch_size, self.max_question_length * outputs.shape[-1]))
+        outputs = self.fc_layers(outputs)
+        
+        return outputs
+
+
+class QuestionTrnasformerClassifier(nn.Module):
+    def __init__(self, d_in, d_out, max_question_length, head=4, hidden=150, num_layers=2, 
+        dropout=0.2, batch_first=True):
+        """A wrapper class that packs input sequences and unpacks output sequences"""
+        super().__init__()
+        self.d_in = d_in
+        self.transformer = TransformerEncoder(d_in, head, hidden, num_layers, dropout, adapter=[], adapter_size=None)
+        self.batch_first = batch_first
+        self.max_question_length = max_question_length
+        self.fc_layers = nn.Sequential(
+            nn.Linear(200, 256),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 10),
+            nn.Softmax(dim=1)
+        )
+
+    def forward(self, inputs, lengths, question_padding):
+        if self.batch_first is True:
+            batch_size = inputs.shape[0]
+            outputs = self.transformer(inputs, task_id=None, padding=question_padding)
+            # print(len(outputs))
+            # print(outputs[-1].shape)
+            # print(outputs[-1][:,0,:].shape)
+            outputs = outputs[-1][:,0,:]
+            outputs = self.fc_layers(outputs)
+        else:
+            assert self.batch_first is False
+
+        return outputs
 
